@@ -1473,7 +1473,8 @@ class reporter {
   auto on(events::run_begin) -> void {}
 
   auto on(events::test_begin test_begin) -> void {
-    printer_ << "Running \"" << test_begin.name << "\"...";
+    printer_ << "Running " << test_begin.type << " \"" << test_begin.name
+             << "\"...";
     fails_ = asserts_.fail;
   }
 
@@ -1606,7 +1607,8 @@ class reporter_junit {
   map<std::string, test_result> results_;
   std::string active_suite_{"global"};
   test_result* active_scope_ = &results_[active_suite_];
-  std::stack<std::string> active_test_{};
+  // first entry of the pair is the test type, second is the test name
+  std::stack<std::pair<std::string, std::string>> active_tests_{};
 
   std::streambuf* cout_save = std::cout.rdbuf();
   std::ostream lcout_;
@@ -1618,14 +1620,18 @@ class reporter_junit {
     ss_out_.clear();
   }
 
-  void check_for_scope(std::string_view test_name) {
-    const std::string str_name(test_name);
-    active_test_.push(str_name);
+  template <class T>
+    requires std::same_as<T, events::test_begin> ||
+             std::same_as<T, events::test_skip>
+  void check_for_scope(const T& test_event) {
+    const std::string str_type(test_event.type);
+    const std::string str_name(test_event.name);
+    active_tests_.push({str_type, str_name});
     const auto [iter, inserted] = active_scope_->nested_tests->try_emplace(
         str_name, test_result{active_scope_, detail::cfg::executable_name,
                               active_suite_, str_name});
     active_scope_ = &active_scope_->nested_tests->at(str_name);
-    if (active_test_.size() == 1) {
+    if (active_tests_.size() == 1) {
       reset_printer();
     }
     active_scope_->run_start = clock_ref::now();
@@ -1646,8 +1652,8 @@ class reporter_junit {
     active_scope_->assertions =
         active_scope_->assertions + active_scope_->fails;
 
-    if (active_test_.top() == test_name) {
-      active_test_.pop();
+    if (active_tests_.top().second == test_name) {
+      active_tests_.pop();
       auto old_scope = active_scope_;
       if (active_scope_->parent != nullptr) {
         active_scope_ = active_scope_->parent;
@@ -1662,8 +1668,8 @@ class reporter_junit {
       return;
     }
     std::stringstream ss("runner returned from test w/o signaling: ");
-    ss << "not popping because '" << active_test_.top() << "' differs from '"
-       << test_name << "'" << std::endl;
+    ss << "not popping because '" << active_tests_.top().second
+       << "' differs from '" << test_name << "'" << std::endl;
 #if defined(__cpp_exceptions)
     throw std::logic_error(ss.str());
 #else
@@ -1701,23 +1707,23 @@ class reporter_junit {
   }
 
   auto on(events::suite_begin suite) -> void {
-    while (active_test_.size() > 0) {
-      pop_scope(active_test_.top());
+    while (active_tests_.size() > 0) {
+      pop_scope(active_tests_.top().second);
     }
     active_suite_ = suite.name;
     active_scope_ = &results_[active_suite_];
   }
 
   auto on(events::suite_end) -> void {
-    while (active_test_.size() > 0) {
-      pop_scope(active_test_.top());
+    while (active_tests_.size() > 0) {
+      pop_scope(active_tests_.top().second);
     }
     active_suite_ = "global";
     active_scope_ = &results_[active_suite_];
   }
 
   auto on(events::test_begin test_event) -> void {  // starts outermost test
-    check_for_scope(test_event.name);
+    check_for_scope(test_event);
 
     if (report_type_ == CONSOLE) {
       ss_out_ << "\n";
@@ -1737,8 +1743,9 @@ class reporter_junit {
         if (detail::cfg::show_successful_tests) {
           if (!active_scope_->nested_tests->empty()) {
             ss_out_ << "\n";
-            ss_out_ << std::string((2 * active_test_.size()) - 2, ' ');
-            ss_out_ << "Running test \"" << test_event.name << "\" - ";
+            ss_out_ << std::string((2 * active_tests_.size()) - 2, ' ');
+            ss_out_ << "Running " << test_event.type << " \"" << test_event.name
+                    << "\" - ";
           }
           ss_out_ << color_.pass << "PASSED" << color_.none;
           print_duration(ss_out_);
@@ -1762,12 +1769,13 @@ class reporter_junit {
   auto on(events::test_skip test_event) -> void {
     ss_out_.clear();
     if (!active_scope_->nested_tests->contains(std::string(test_event.name))) {
-      check_for_scope(test_event.name);
+      check_for_scope(test_event);
       active_scope_->status = "SKIPPED";
       active_scope_->skipped += 1;
       if (report_type_ == CONSOLE) {
-        lcout_ << '\n' << std::string((2 * active_test_.size()) - 2, ' ');
-        lcout_ << "Running \"" << test_event.name << "\"... ";
+        lcout_ << '\n' << std::string((2 * active_tests_.size()) - 2, ' ');
+        lcout_ << "Running " << test_event.type << " \"" << test_event.name
+               << "\"... ";
         lcout_ << color_.skip << "SKIPPED" << color_.none;
       }
       reset_printer();
@@ -1785,15 +1793,16 @@ class reporter_junit {
 
   auto on(events::exception exception) -> void {
     active_scope_->fails++;
-    if (!active_test_.empty()) {
+    if (!active_tests_.empty()) {
       active_scope_->report_string += color_.fail;
       active_scope_->report_string += "Unexpected exception with message:\n";
       active_scope_->report_string += exception.what();
       active_scope_->report_string += color_.none;
     }
     if (report_type_ == CONSOLE) {
-      lcout_ << std::string((2 * active_test_.size()) - 2, ' ');
-      lcout_ << "Running test \"" << active_test_.top() << "\"... ";
+      lcout_ << std::string((2 * active_tests_.size()) - 2, ' ');
+      lcout_ << "Running " << active_tests_.top().first << " \""
+             << active_tests_.top().second << "\"... ";
       lcout_ << color_.fail << "FAILED" << color_.none;
       print_duration(lcout_);
       lcout_ << '\n';
@@ -1801,7 +1810,8 @@ class reporter_junit {
     }
     if (detail::cfg::abort_early ||
         active_scope_->fails >= detail::cfg::abort_after_n_failures) {
-      std::cerr << "early abort for test : " << active_test_.top() << "after ";
+      std::cerr << "early abort for test : " << active_tests_.top().second
+                << "after ";
       std::cerr << active_scope_->fails << " failures total." << std::endl;
       std::exit(-1);
     }
@@ -1833,7 +1843,8 @@ class reporter_junit {
     }
     if (detail::cfg::abort_early ||
         active_scope_->fails >= detail::cfg::abort_after_n_failures) {
-      std::cerr << "early abort for test : " << active_test_.top() << "after ";
+      std::cerr << "early abort for test : " << active_tests_.top().second
+                << "after ";
       std::cerr << active_scope_->fails << " failures total." << std::endl;
       std::exit(-1);
     }

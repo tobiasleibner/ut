@@ -1827,10 +1827,10 @@ class reporter_junit {
     ss << color_.fail << ']' << color_.none;
     active_scope_->report_string += ss.str();
     active_scope_->fails++;
-    reset_printer();
     if (report_type_ == CONSOLE) {
-      lcout_ << active_scope_->report_string << "\n\n";
+      lcout_ << ss.str() << "\n\n";
     }
+    reset_printer();
     if (detail::cfg::abort_early ||
         active_scope_->fails >= detail::cfg::abort_after_n_failures) {
       std::cerr << "early abort for test : " << active_test_.top() << "after ";
